@@ -124,28 +124,46 @@ public class DefaultMessageStore implements MessageStore {
         this.brokerConfig = brokerConfig;
         this.messageStoreConfig = messageStoreConfig;
         this.brokerStatsManager = brokerStatsManager;
+        /** 创建mappedFile的线程*/
         this.allocateMappedFileService = new AllocateMappedFileService(this);
         if (messageStoreConfig.isEnableDLegerCommitLog()) {
+            // DLedgerCommitLog(raft日志条目)
             this.commitLog = new DLedgerCommitLog(this);
         } else {
+            // 消息存储CommitLog
             this.commitLog = new CommitLog(this);
         }
+        /**
+         * consumeQueue映射关系表topic-->(queueId--->ConsumeQueue)
+         */
         this.consumeQueueTable = new ConcurrentHashMap<>(32);
 
+        /** 将consumeQueue从mappedFile flush到磁盘的线程*/
         this.flushConsumeQueueService = new FlushConsumeQueueService();
+        /** 清理过期的commitLog的线程*/
         this.cleanCommitLogService = new CleanCommitLogService();
+        /** 清理过期的consumeQueue的线程*/
         this.cleanConsumeQueueService = new CleanConsumeQueueService();
         this.storeStatsService = new StoreStatsService();
+        /** 创建index的线程池*/
         this.indexService = new IndexService(this);
         if (!messageStoreConfig.isEnableDLegerCommitLog()) {
+            /**
+             *  master与slave同步的线程
+             *  在开启DLeger后并不需要，Dleger通过raft协议进行日志条目同步
+             */
             this.haService = new HAService(this);
         } else {
             this.haService = null;
         }
+
+        /** 异步构建consumerQueue的线程*/
         this.reputMessageService = new ReputMessageService();
 
+        /** 延迟消息发送线程*/
         this.scheduleMessageService = new ScheduleMessageService(this);
 
+        /** 堆外内存池(需要开启异步刷盘机制)*/
         this.transientStorePool = new TransientStorePool(messageStoreConfig);
 
         if (messageStoreConfig.isTransientStorePoolEnable()) {
@@ -157,9 +175,15 @@ public class DefaultMessageStore implements MessageStore {
         this.indexService.start();
 
         this.dispatcherList = new LinkedList<>();
+        /**
+         * 用于reputMessageService异步构建consumeQueue和index的实例对象
+         */
         this.dispatcherList.addLast(new CommitLogDispatcherBuildConsumeQueue());
         this.dispatcherList.addLast(new CommitLogDispatcherBuildIndex());
 
+        /**
+         * 文件锁避免重复启动
+         */
         File file = new File(StorePathConfigHelper.getLockFile(messageStoreConfig.getStorePathRootDir()));
         MappedFile.ensureDirOK(file.getParent());
         lockFile = new RandomAccessFile(file, "rw");
@@ -222,6 +246,7 @@ public class DefaultMessageStore implements MessageStore {
      */
     public void start() throws Exception {
 
+        // 获取文件锁，避免重复启动
         lock = lockFile.getChannel().tryLock(0, 1, false);
         if (lock == null || lock.isShared() || !lock.isValid()) {
             throw new RuntimeException("Lock failed,MQ already started");
@@ -240,6 +265,9 @@ public class DefaultMessageStore implements MessageStore {
             for (ConcurrentMap<Integer, ConsumeQueue> maps : this.consumeQueueTable.values()) {
                 for (ConsumeQueue logic : maps.values()) {
                     if (logic.getMaxPhysicOffset() > maxPhysicalPosInLogicQueue) {
+                        /**
+                         * commitLog已经构建consumeQueue最大偏移位点
+                         */
                         maxPhysicalPosInLogicQueue = logic.getMaxPhysicOffset();
                     }
                 }
@@ -261,7 +289,11 @@ public class DefaultMessageStore implements MessageStore {
             }
             log.info("[SetReputOffset] maxPhysicalPosInLogicQueue={} clMinOffset={} clMaxOffset={} clConfirmedOffset={}",
                 maxPhysicalPosInLogicQueue, this.commitLog.getMinOffset(), this.commitLog.getMaxOffset(), this.commitLog.getConfirmOffset());
+            // 启动时设置构建consumeQueue、indexFile的位置
             this.reputMessageService.setReputFromOffset(maxPhysicalPosInLogicQueue);
+            /**
+             * 启动reput线程异步构建consumeQueue、IndexFile
+             */
             this.reputMessageService.start();
 
             /**
@@ -269,25 +301,54 @@ public class DefaultMessageStore implements MessageStore {
              *  2. DLedger committedPos may be missing, so here just require dispatchBehindBytes <= 0
              */
             while (true) {
+                /**
+                 * 确保所有commitLog都构建consumeQueue在启动之前
+                 * Dledger采用raft协议，commit日志条目的消息可能丢失，导致consumeQueue还没构建
+                 */
                 if (dispatchBehindBytes() <= 0) {
                     break;
                 }
                 Thread.sleep(1000);
                 log.info("Try to finish doing reput the messages fall behind during the starting, reputOffset={} maxOffset={} behind={}", this.reputMessageService.getReputFromOffset(), this.getMaxPhyOffset(), this.dispatchBehindBytes());
             }
+            /**
+             * 恢复topic对应的每个consumeQueue对应的偏移量，
+             * 为后续生产的消息能构建到consumeQueue正确的位置做准备(预分配consumeQueue的偏移位置)
+             */
             this.recoverTopicQueueTable();
         }
 
         if (!messageStoreConfig.isEnableDLegerCommitLog()) {
+            /**
+             * 未开启Dledger，启动HA线程用于主从同步，从节点上报偏移位点
+             * 主节点根据偏移位点同步commitLog给从节点
+             */
             this.haService.start();
+            /**
+             * 启动延迟消息处理线程，仅支持固定延迟级别
+             * 如果是Dledger模式，那么将会在某个节点被选举为leader时进行启动
+             */
             this.handleScheduleMessageService(messageStoreConfig.getBrokerRole());
         }
 
+        /**
+         * 启动consumeQueue mappedFile刷盘线程
+         */
         this.flushConsumeQueueService.start();
+        /**
+         * 启动commitLog
+         */
         this.commitLog.start();
         this.storeStatsService.start();
 
+        /**
+         * 创建临时文件，正常shutdown将删除临时文件
+         * 文件恢复时是判断是否正常关闭进行recover
+         */
         this.createTempFile();
+        /**
+         * 开启各种定时任务，如磁盘清理任务、生产消息加锁时间过长堆栈dump任务等
+         */
         this.addScheduleTask();
         this.shutdown = false;
     }
@@ -597,6 +658,7 @@ public class DefaultMessageStore implements MessageStore {
                     nextBeginOffset = nextOffsetCorrection(offset, maxOffset);
                 }
             } else {
+                // 根据consumeQueue的逻辑偏移量获取逻辑消息consumeQueue
                 SelectMappedBufferResult bufferConsumeQueue = consumeQueue.getIndexBuffer(offset);
                 if (bufferConsumeQueue != null) {
                     try {
@@ -609,6 +671,7 @@ public class DefaultMessageStore implements MessageStore {
                         final int maxFilterMessageCount = Math.max(16000, maxMsgNums * ConsumeQueue.CQ_STORE_UNIT_SIZE);
                         final boolean diskFallRecorded = this.messageStoreConfig.isDiskFallRecorded();
                         ConsumeQueueExt.CqExtUnit cqExtUnit = new ConsumeQueueExt.CqExtUnit();
+                        // 最多拉取不超过16000/20 = 800条消息
                         for (; i < bufferConsumeQueue.getSize() && i < maxFilterMessageCount; i += ConsumeQueue.CQ_STORE_UNIT_SIZE) {
                             long offsetPy = bufferConsumeQueue.getByteBuffer().getLong();
                             int sizePy = bufferConsumeQueue.getByteBuffer().getInt();
@@ -621,6 +684,10 @@ public class DefaultMessageStore implements MessageStore {
                                     continue;
                             }
 
+                            /**
+                             *  通过offset与commitLog当前写入的位点比较
+                             *  如果差距大于了内存总大小的40% 说明消息被已写入磁盘中 不在pageCache中
+                             */
                             boolean isInDisk = checkInDiskByCommitOffset(offsetPy, maxOffsetPy);
 
                             if (this.isTheBatchFull(sizePy, maxMsgNums, getResult.getBufferTotalSize(), getResult.getMessageCount(),
@@ -641,6 +708,7 @@ public class DefaultMessageStore implements MessageStore {
                                 }
                             }
 
+                            // tag过滤
                             if (messageFilter != null
                                 && !messageFilter.isMatchedByConsumeQueue(isTagsCodeLegal ? tagsCode : null, extRet ? cqExtUnit : null)) {
                                 if (getResult.getBufferTotalSize() == 0) {
@@ -677,6 +745,7 @@ public class DefaultMessageStore implements MessageStore {
                         }
 
                         if (diskFallRecorded) {
+                            // 记录commitLog和当前pull消息offset的差距
                             long fallBehind = maxOffsetPy - maxPhyOffsetPulling;
                             brokerStatsManager.recordDiskFallBehindSize(group, topic, queueId, fallBehind);
                         }
@@ -684,6 +753,10 @@ public class DefaultMessageStore implements MessageStore {
                         nextBeginOffset = offset + (i / ConsumeQueue.CQ_STORE_UNIT_SIZE);
 
                         long diff = maxOffsetPy - maxPhyOffsetPulling;
+                        /**
+                         *  消息消费滞后超过总内存的40%，如果此时从master消费将导致大量的文件随机读写
+                         *  从而导致缺页中断，为了避免这种情况，建议从slave进行消费
+                         */
                         long memory = (long) (StoreUtil.TOTAL_PHYSICAL_MEMORY_SIZE
                             * (this.messageStoreConfig.getAccessMessageInMemoryMaxRatio() / 100.0));
                         getResult.setSuggestPullingFromSlave(diff > memory);
@@ -1252,6 +1325,9 @@ public class DefaultMessageStore implements MessageStore {
             return true;
         }
 
+        /**
+         * 根据消息是否在磁盘决定最大消息pull条数
+         */
         if (isInDisk) {
             if ((bufferTotal + sizePy) > this.messageStoreConfig.getMaxTransferBytesOnMessageInDisk()) {
                 return true;
@@ -1292,6 +1368,10 @@ public class DefaultMessageStore implements MessageStore {
 
     private void addScheduleTask() {
 
+        /**
+         * 磁盘空间不足、文件过期、手动调用
+         * 删除commitLog consumeQueue文件
+         */
         this.scheduledExecutorService.scheduleAtFixedRate(new Runnable() {
             @Override
             public void run() {
@@ -1299,6 +1379,9 @@ public class DefaultMessageStore implements MessageStore {
             }
         }, 1000 * 60, this.messageStoreConfig.getCleanResourceInterval(), TimeUnit.MILLISECONDS);
 
+        /**
+         * 自我检查,mappedFile文件大小是否与配置相等
+         */
         this.scheduledExecutorService.scheduleAtFixedRate(new Runnable() {
             @Override
             public void run() {
@@ -1306,6 +1389,10 @@ public class DefaultMessageStore implements MessageStore {
             }
         }, 1, 10, TimeUnit.MINUTES);
 
+        /**
+         * 生产消息时加锁时间超过了1s那么dump堆栈到文件中进行保存
+         * 方便后续排查问题
+         */
         this.scheduledExecutorService.scheduleAtFixedRate(new Runnable() {
             @Override
             public void run() {
@@ -1333,6 +1420,9 @@ public class DefaultMessageStore implements MessageStore {
         // DefaultMessageStore.this.cleanExpiredConsumerQueue();
         // }
         // }, 1, 1, TimeUnit.HOURS);
+        /**
+         * 检查磁盘空间是否足够，当超过某个阈值通过日志进行打印
+         */
         this.diskCheckScheduledExecutorService.scheduleAtFixedRate(new Runnable() {
             public void run() {
                 DefaultMessageStore.this.cleanCommitLogService.isSpaceFull();
@@ -1449,11 +1539,18 @@ public class DefaultMessageStore implements MessageStore {
 
     public void recoverTopicQueueTable() {
         HashMap<String/* topic-queueid */, Long/* offset */> table = new HashMap<String, Long>(1024);
+        // commitLog最小偏移位置
         long minPhyOffset = this.commitLog.getMinOffset();
         for (ConcurrentMap<Integer, ConsumeQueue> maps : this.consumeQueueTable.values()) {
             for (ConsumeQueue logic : maps.values()) {
                 String key = logic.getTopic() + "-" + logic.getQueueId();
+                // 每个consumeQueue最大写入位置
                 table.put(key, logic.getMaxOffsetInQueue());
+                /**
+                 * 纠正consumeQueue逻辑队列的最小偏移位置，
+                 * 也就是consumeQueue的最小偏移位置必须大于等于commitLog的最小偏移位置
+                 * 这样consumer才能从commitLog找到消息进行消费
+                 */
                 logic.correctMinOffset(minPhyOffset);
             }
         }
@@ -1515,6 +1612,9 @@ public class DefaultMessageStore implements MessageStore {
             if (brokerRole == BrokerRole.SLAVE) {
                 this.scheduleMessageService.shutdown();
             } else {
+                /**
+                 * 启动延迟消息线程
+                 */
                 this.scheduleMessageService.start();
             }
         }
@@ -1939,6 +2039,7 @@ public class DefaultMessageStore implements MessageStore {
 
                                     if (BrokerRole.SLAVE != DefaultMessageStore.this.getMessageStoreConfig().getBrokerRole()
                                         && DefaultMessageStore.this.brokerConfig.isLongPollingEnable()) {
+                                        // 唤醒pullHoldService
                                         DefaultMessageStore.this.messageArrivingListener.arriving(dispatchRequest.getTopic(),
                                             dispatchRequest.getQueueId(), dispatchRequest.getConsumeQueueOffset() + 1,
                                             dispatchRequest.getTagsCode(), dispatchRequest.getStoreTimestamp(),

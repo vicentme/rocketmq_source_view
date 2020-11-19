@@ -75,15 +75,22 @@ public class NamesrvController {
 
     public boolean initialize() {
 
+        // 加载kv配置
         this.kvConfigManager.load();
 
+        // 实例化netty服务端
         this.remotingServer = new NettyRemotingServer(this.nettyServerConfig, this.brokerHousekeepingService);
 
+        // netty服务端业务线程池
         this.remotingExecutor =
             Executors.newFixedThreadPool(nettyServerConfig.getServerWorkerThreads(), new ThreadFactoryImpl("RemotingExecutorThread_"));
 
+        // 注册netty事件处理器DefaultRequestProcessor，并同remotingExecutor进行绑定
         this.registerProcessor();
 
+        /**
+         * 下线宕掉的broker
+         */
         this.scheduledExecutorService.scheduleAtFixedRate(new Runnable() {
 
             @Override
@@ -92,6 +99,9 @@ public class NamesrvController {
             }
         }, 5, 10, TimeUnit.SECONDS);
 
+        /**
+         * 打印kv配置
+         */
         this.scheduledExecutorService.scheduleAtFixedRate(new Runnable() {
 
             @Override
@@ -153,6 +163,7 @@ public class NamesrvController {
     }
 
     public void start() throws Exception {
+        // 启动netty服务端
         this.remotingServer.start();
 
         if (this.fileWatchService != null) {

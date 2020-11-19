@@ -201,7 +201,9 @@ public class DefaultMQProducer extends ClientConfig implements MQProducer {
      * @param rpcHook RPC hook to execute per each remoting command execution.
      */
     public DefaultMQProducer(final String namespace, final String producerGroup, RPCHook rpcHook) {
+        // 命名空间
         this.namespace = namespace;
+        // 消费组
         this.producerGroup = producerGroup;
         defaultMQProducerImpl = new DefaultMQProducerImpl(this, rpcHook);
     }
@@ -268,7 +270,13 @@ public class DefaultMQProducer extends ClientConfig implements MQProducer {
      */
     @Override
     public void start() throws MQClientException {
+        /**
+         * 拼接命名空间
+         */
         this.setProducerGroup(withNamespace(this.producerGroup));
+        /**
+         * 启动生产者客户端
+         */
         this.defaultMQProducerImpl.start();
         if (null != traceDispatcher) {
             try {

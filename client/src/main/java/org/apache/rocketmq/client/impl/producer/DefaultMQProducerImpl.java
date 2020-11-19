@@ -122,7 +122,13 @@ public class DefaultMQProducerImpl implements MQProducerInner {
         this.defaultMQProducer = defaultMQProducer;
         this.rpcHook = rpcHook;
 
+        /**
+         * 异步发送消息线程池阻塞队列
+         */
         this.asyncSenderThreadPoolQueue = new LinkedBlockingQueue<Runnable>(50000);
+        /**
+         * 异步发送消息线程池
+         */
         this.defaultAsyncSenderExecutor = new ThreadPoolExecutor(
             Runtime.getRuntime().availableProcessors(),
             Runtime.getRuntime().availableProcessors(),
@@ -178,24 +184,47 @@ public class DefaultMQProducerImpl implements MQProducerInner {
     public void start(final boolean startFactory) throws MQClientException {
         switch (this.serviceState) {
             case CREATE_JUST:
+                // 修改生产者状态
                 this.serviceState = ServiceState.START_FAILED;
 
+                /**
+                 * producerGroup 合法性校验
+                 */
                 this.checkConfig();
 
                 if (!this.defaultMQProducer.getProducerGroup().equals(MixAll.CLIENT_INNER_PRODUCER_GROUP)) {
+                    /**
+                     * 修改生产者客户端instanceName为生产者jvm进程ID
+                     * 保证客户端进程内共享一个客户端实例(共享连接)
+                     */
                     this.defaultMQProducer.changeInstanceNameToPID();
                 }
 
+                /**
+                 * 从缓存获取mq客户端实例 或者创建一个实例放到缓存中
+                 */
                 this.mQClientFactory = MQClientManager.getInstance().getOrCreateMQClientInstance(this.defaultMQProducer, rpcHook);
 
+                /**
+                 * 一个jvm进程内多个producer共享一个MQClientInstance对象
+                 * 建立消费组与producer实例之间的映射关系(事务消息，事务回查时比较重要)
+                 * 注册生产者组到MQClientInstance的ProducerTable
+                 */
                 boolean registerOK = mQClientFactory.registerProducer(this.defaultMQProducer.getProducerGroup(), this);
                 if (!registerOK) {
+                    /**
+                     * 生产组重复
+                     */
                     this.serviceState = ServiceState.CREATE_JUST;
                     throw new MQClientException("The producer group[" + this.defaultMQProducer.getProducerGroup()
                         + "] has been created before, specify another name please." + FAQUrl.suggestTodo(FAQUrl.GROUP_NAME_DUPLICATE_URL),
                         null);
                 }
 
+                /**
+                 * 注册默认topic(TBW102)的路由信息
+                 * 在开启自动创建topic的情况下，根据默认topic路由信息到各个broker进行创建
+                 */
                 this.topicPublishInfoTable.put(this.defaultMQProducer.getCreateTopicKey(), new TopicPublishInfo());
 
                 if (startFactory) {
@@ -232,6 +261,9 @@ public class DefaultMQProducerImpl implements MQProducerInner {
     }
 
     private void checkConfig() throws MQClientException {
+        /**
+         * producerGroup合法性校验
+         */
         Validators.checkGroup(this.defaultMQProducer.getProducerGroup());
 
         if (null == this.defaultMQProducer.getProducerGroup()) {
@@ -1216,8 +1248,12 @@ public class DefaultMQProducerImpl implements MQProducerInner {
 
         SendResult sendResult = null;
         MessageAccessor.putProperty(msg, MessageConst.PROPERTY_TRANSACTION_PREPARED, "true");
+        /**
+         * producer_group,事务回查根据的producer_group选择client进行回查
+         */
         MessageAccessor.putProperty(msg, MessageConst.PROPERTY_PRODUCER_GROUP, this.defaultMQProducer.getProducerGroup());
         try {
+            // 发送prepare消息
             sendResult = this.send(msg);
         } catch (Exception e) {
             throw new MQClientException("send message Exception", e);
@@ -1239,6 +1275,7 @@ public class DefaultMQProducerImpl implements MQProducerInner {
                         localTransactionState = localTransactionExecuter.executeLocalTransactionBranch(msg, arg);
                     } else if (transactionListener != null) {
                         log.debug("Used new transaction API");
+                        // 执行本地事务
                         localTransactionState = transactionListener.executeLocalTransaction(msg, arg);
                     }
                     if (null == localTransactionState) {
@@ -1266,6 +1303,7 @@ public class DefaultMQProducerImpl implements MQProducerInner {
         }
 
         try {
+            // 根据本地事务执行状态决定是否提交、会滚或者未决事务
             this.endTransaction(sendResult, localTransactionState, localException);
         } catch (Exception e) {
             log.warn("local transaction execute " + localTransactionState + ", but end broker transaction failed", e);
@@ -1300,6 +1338,7 @@ public class DefaultMQProducerImpl implements MQProducerInner {
             id = MessageDecoder.decodeMessageId(sendResult.getMsgId());
         }
         String transactionId = sendResult.getTransactionId();
+        // 选择同一个broker
         final String brokerAddr = this.mQClientFactory.findBrokerAddressInPublish(sendResult.getMessageQueue().getBrokerName());
         EndTransactionRequestHeader requestHeader = new EndTransactionRequestHeader();
         requestHeader.setTransactionId(transactionId);

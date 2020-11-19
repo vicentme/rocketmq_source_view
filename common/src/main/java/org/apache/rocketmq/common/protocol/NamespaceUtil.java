@@ -86,10 +86,17 @@ public class NamespaceUtil {
             return resourceWithOutNamespace;
         }
 
+        /**
+         * 是否是系统内部的topic或者消费组
+         * 是否已经通过namespace包装过了
+         */
         if (isSystemResource(resourceWithOutNamespace) || isAlreadyWithNamespace(resourceWithOutNamespace, namespace)) {
             return resourceWithOutNamespace;
         }
 
+        /**
+         * 重试或DLQ topic，截取原始topic
+         */
         String resourceWithoutRetryAndDLQ = withOutRetryAndDLQ(resourceWithOutNamespace);
         StringBuilder stringBuilder = new StringBuilder();
 

@@ -55,6 +55,9 @@ public class BrokerStartup {
     public static InternalLogger log;
 
     public static void main(String[] args) {
+        /**
+         * 解析启动参数创建broker实例并启动
+         */
         start(createBrokerController(args));
     }
 
@@ -90,10 +93,12 @@ public class BrokerStartup {
     public static BrokerController createBrokerController(String[] args) {
         System.setProperty(RemotingCommand.REMOTING_VERSION_KEY, Integer.toString(MQVersion.CURRENT_VERSION));
 
+        // 设置默认的netty发送缓存区大小
         if (null == System.getProperty(NettySystemConfig.COM_ROCKETMQ_REMOTING_SOCKET_SNDBUF_SIZE)) {
             NettySystemConfig.socketSndbufSize = 131072;
         }
 
+        // 设置接收数据缓存区大小
         if (null == System.getProperty(NettySystemConfig.COM_ROCKETMQ_REMOTING_SOCKET_RCVBUF_SIZE)) {
             NettySystemConfig.socketRcvbufSize = 131072;
         }
@@ -101,6 +106,9 @@ public class BrokerStartup {
         try {
             //PackageConflictDetect.detectFastjson();
             Options options = ServerUtil.buildCommandlineOptions(new Options());
+            /**
+             * 解析启动参数如：-h -c -p 等
+             */
             commandLine = ServerUtil.parseCmdLine("mqbroker", args, buildCommandlineOptions(options),
                 new PosixParser());
             if (null == commandLine) {
@@ -113,6 +121,9 @@ public class BrokerStartup {
 
             nettyClientConfig.setUseTLS(Boolean.parseBoolean(System.getProperty(TLS_ENABLE,
                 String.valueOf(TlsSystemConfig.tlsMode == TlsMode.ENFORCING))));
+            /**
+             * broker端口号默认10911
+             */
             nettyServerConfig.setListenPort(10911);
             final MessageStoreConfig messageStoreConfig = new MessageStoreConfig();
 
@@ -124,6 +135,9 @@ public class BrokerStartup {
             if (commandLine.hasOption('c')) {
                 String file = commandLine.getOptionValue('c');
                 if (file != null) {
+                    /**
+                     * 根据启动参数解析配置文件并赋值到具体的配置类实例
+                     */
                     configFile = file;
                     InputStream in = new BufferedInputStream(new FileInputStream(file));
                     properties = new Properties();
@@ -140,6 +154,9 @@ public class BrokerStartup {
                 }
             }
 
+            /**
+             * 优先使用启动参数配置的
+             */
             MixAll.properties2Object(ServerUtil.commandLine2Properties(commandLine), brokerConfig);
 
             if (null == brokerConfig.getRocketmqHome()) {
@@ -147,6 +164,7 @@ public class BrokerStartup {
                 System.exit(-2);
             }
 
+            // 校验namesrv地址
             String namesrvAddr = brokerConfig.getNamesrvAddr();
             if (null != namesrvAddr) {
                 try {
@@ -178,11 +196,17 @@ public class BrokerStartup {
                     break;
             }
 
+            /**
+             * 是否开启dlegerCommitLog，
+             * DLeger采用raft协议支持failover故障恢复保证集群高可用
+             */
             if (messageStoreConfig.isEnableDLegerCommitLog()) {
                 brokerConfig.setBrokerId(-1);
             }
 
+            // 设置HA端口号，master同slave进行数据同步的端口
             messageStoreConfig.setHaListenPort(nettyServerConfig.getListenPort() + 1);
+            // 日志配置
             LoggerContext lc = (LoggerContext) LoggerFactory.getILoggerFactory();
             JoranConfigurator configurator = new JoranConfigurator();
             configurator.setContext(lc);
@@ -211,6 +235,9 @@ public class BrokerStartup {
             MixAll.printObjectProperties(log, nettyClientConfig);
             MixAll.printObjectProperties(log, messageStoreConfig);
 
+            /**
+             * 实例化broker,通过构造函数会实例化各种broker相关的实例
+             */
             final BrokerController controller = new BrokerController(
                 brokerConfig,
                 nettyServerConfig,
@@ -219,6 +246,9 @@ public class BrokerStartup {
             // remember all configs to prevent discard
             controller.getConfiguration().registerConfig(properties);
 
+            /**
+             * 初始化
+             */
             boolean initResult = controller.initialize();
             if (!initResult) {
                 controller.shutdown();

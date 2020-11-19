@@ -431,6 +431,10 @@ public class RouteInfoManager {
         while (it.hasNext()) {
             Entry<String, BrokerLiveInfo> next = it.next();
             long last = next.getValue().getLastUpdateTimestamp();
+            /**
+             * nameServer 超过120秒未收到broker心跳则认为该broker已经下线
+             * 那么关闭broker的channel,并从nameServer中进行下线
+             */
             if ((last + BROKER_CHANNEL_EXPIRED_TIME) < System.currentTimeMillis()) {
                 RemotingUtil.closeChannel(next.getValue().getChannel());
                 it.remove();

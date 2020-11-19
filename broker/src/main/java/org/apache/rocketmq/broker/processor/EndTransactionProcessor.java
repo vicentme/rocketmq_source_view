@@ -64,6 +64,7 @@ public class EndTransactionProcessor extends AsyncNettyRequestProcessor implemen
         }
 
         if (requestHeader.getFromTransactionCheck()) {
+            // endTransaction请求来自于事务回查
             switch (requestHeader.getCommitOrRollback()) {
                 case MessageSysFlag.TRANSACTION_NOT_TYPE: {
                     LOGGER.warn("Check producer[{}] transaction state, but it's pending status."
@@ -97,6 +98,7 @@ public class EndTransactionProcessor extends AsyncNettyRequestProcessor implemen
             }
         } else {
             switch (requestHeader.getCommitOrRollback()) {
+                // 本地事务状态未知或本地事务执行异常，不进行处理让事务进行回查
                 case MessageSysFlag.TRANSACTION_NOT_TYPE: {
                     LOGGER.warn("The producer[{}] end transaction in sending message,  and it's pending status."
                             + "RequestHeader: {} Remark: {}",
@@ -124,18 +126,27 @@ public class EndTransactionProcessor extends AsyncNettyRequestProcessor implemen
         }
         OperationResult result = new OperationResult();
         if (MessageSysFlag.TRANSACTION_COMMIT_TYPE == requestHeader.getCommitOrRollback()) {
+            // 需要提交的事务消息
             result = this.brokerController.getTransactionalMessageService().commitMessage(requestHeader);
             if (result.getResponseCode() == ResponseCode.SUCCESS) {
                 RemotingCommand res = checkPrepareMessage(result.getPrepareMessage(), requestHeader);
                 if (res.getCode() == ResponseCode.SUCCESS) {
+                    // 恢复事务消息topic、queueID准备投递
                     MessageExtBrokerInner msgInner = endMessageTransaction(result.getPrepareMessage());
+                    // 重置消息事务属性，以便消息投递生成consumeQueue
                     msgInner.setSysFlag(MessageSysFlag.resetTransactionValue(msgInner.getSysFlag(), requestHeader.getCommitOrRollback()));
+                    // consumeQueue逻辑偏移量
                     msgInner.setQueueOffset(requestHeader.getTranStateTableOffset());
                     msgInner.setPreparedTransactionOffset(requestHeader.getCommitLogOffset());
                     msgInner.setStoreTimestamp(result.getPrepareMessage().getStoreTimestamp());
                     MessageAccessor.clearProperty(msgInner, MessageConst.PROPERTY_TRANSACTION_PREPARED);
+                    // 投递消息
                     RemotingCommand sendResult = sendFinalMessage(msgInner);
                     if (sendResult.getCode() == ResponseCode.SUCCESS) {
+                        /**
+                         * 写op_half，body = RMQ_SYS_TRANS_OP_HALF_TOPIC tag=d
+                         * 事务状态已经确定，不需要在进行回查
+                         */
                         this.brokerController.getTransactionalMessageService().deletePrepareMessage(result.getPrepareMessage());
                     }
                     return sendResult;

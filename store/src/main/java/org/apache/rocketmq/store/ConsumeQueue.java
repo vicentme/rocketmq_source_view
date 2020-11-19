@@ -337,23 +337,37 @@ public class ConsumeQueue {
     }
 
     public void correctMinOffset(long phyMinOffset) {
+        // consumeQueue的第一个mappedFile
         MappedFile mappedFile = this.mappedFileQueue.getFirstMappedFile();
         long minExtAddr = 1;
         if (mappedFile != null) {
+            // 读取consumeQueue
             SelectMappedBufferResult result = mappedFile.selectMappedBuffer(0);
             if (result != null) {
                 try {
+                    // 遍历consumeQueue
                     for (int i = 0; i < result.getSize(); i += ConsumeQueue.CQ_STORE_UNIT_SIZE) {
+                        // commitLog物理偏移量
                         long offsetPy = result.getByteBuffer().getLong();
+                        // 消息大小
                         result.getByteBuffer().getInt();
+                        // tag的hashcode
                         long tagsCode = result.getByteBuffer().getLong();
 
+                        /**
+                         * 通过commitLog的最小偏移偏移同consumeQueue的对应的最小commitLog偏移位置进行比较
+                         * 纠正consumeQueue对应的最小逻辑偏移位置(consumer能消费该consumeQueue的最小起始位置)
+                         */
                         if (offsetPy >= phyMinOffset) {
+                            // 记录最小逻辑偏移位置
                             this.minLogicOffset = mappedFile.getFileFromOffset() + i;
                             log.info("Compute logical min offset: {}, topic: {}, queueId: {}",
                                 this.getMinOffsetInQueue(), this.topic, this.queueId);
                             // This maybe not take effect, when not every consume queue has extend file.
                             if (isExtAddr(tagsCode)) {
+                                /**
+                                 * 支持sql过滤，ConsumeQueueExt对应的tagCode为对应mappedFile的物理偏移位置
+                                 */
                                 minExtAddr = tagsCode;
                             }
                             break;
@@ -368,6 +382,9 @@ public class ConsumeQueue {
         }
 
         if (isExtReadEnable()) {
+            /**
+             * 删除小于commitLog最小偏移位置的无效消息
+             */
             this.consumeQueueExt.truncateByMinAddress(minExtAddr);
         }
     }
@@ -441,6 +458,10 @@ public class ConsumeQueue {
         MappedFile mappedFile = this.mappedFileQueue.getLastMappedFile(expectLogicOffset);
         if (mappedFile != null) {
 
+            /**
+             *  mappedFile是consumeQueue的第一个映射文件，并且consumeQueue逻辑偏移量不为0，
+             *  也就是说明consumeQueue文件删除过，通过手动填充空白保证对齐
+             */
             if (mappedFile.isFirstCreateInQueue() && cqOffset != 0 && mappedFile.getWrotePosition() == 0) {
                 this.minLogicOffset = expectLogicOffset;
                 this.mappedFileQueue.setFlushedWhere(expectLogicOffset);

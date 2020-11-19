@@ -101,9 +101,17 @@ public class CommitLog {
     }
 
     public void start() {
+        /**
+         * 启动commitLog mappedFile刷盘线程
+         */
         this.flushCommitLogService.start();
 
         if (defaultMessageStore.getMessageStoreConfig().isTransientStorePoolEnable()) {
+            /**
+             * 如果开启堆外内存池，那么开启FlushCommitLogService线程
+             * 首先通过FlushCommitLogService线程将消息commit到fileChannel
+             * 再通过刷盘线程写入到磁盘
+             */
             this.commitLogService.start();
         }
     }
@@ -340,6 +348,10 @@ public class CommitLog {
 
                 // Timing message processing
                 {
+                    /**
+                     * 延迟消息：将延迟消息tag设置为延迟消息投递时间，避免投递延迟消息时
+                     * 再去访问commitLog进行判断，减少一次commitLog的获取
+                     */
                     String t = propertiesMap.get(MessageConst.PROPERTY_DELAY_TIME_LEVEL);
                     if (TopicValidator.RMQ_SYS_SCHEDULE_TOPIC.equals(topic) && t != null) {
                         int delayLevel = Integer.parseInt(t);
@@ -578,9 +590,17 @@ public class CommitLog {
                     msg.setDelayTimeLevel(this.defaultMessageStore.getScheduleMessageService().getMaxDelayLevel());
                 }
 
+                /**
+                 *  延迟消息或重试消息 delayLevel > 0,投递到延迟消息队列
+                 *  每个延迟级别对应一个queue,queueId = dalayLevel - 1
+                 */
                 topic = TopicValidator.RMQ_SYS_SCHEDULE_TOPIC;
                 queueId = ScheduleMessageService.delayLevel2QueueId(msg.getDelayTimeLevel());
 
+                /**
+                 * 备份延迟消息的真实topic和queueId
+                 * 重试消息的重试topic和queueId
+                 */
                 // Backup real topic, queueId
                 MessageAccessor.putProperty(msg, MessageConst.PROPERTY_REAL_TOPIC, msg.getTopic());
                 MessageAccessor.putProperty(msg, MessageConst.PROPERTY_REAL_QUEUE_ID, String.valueOf(msg.getQueueId()));
@@ -906,6 +926,7 @@ public class CommitLog {
         if (FlushDiskType.SYNC_FLUSH == this.defaultMessageStore.getMessageStoreConfig().getFlushDiskType()) {
             final GroupCommitService service = (GroupCommitService) this.flushCommitLogService;
             if (messageExt.isWaitStoreMsgOK()) {
+                // 异步批量刷盘
                 GroupCommitRequest request = new GroupCommitRequest(result.getWroteOffset() + result.getWroteBytes(),
                         this.defaultMessageStore.getMessageStoreConfig().getSyncFlushTimeout());
                 service.putRequest(request);

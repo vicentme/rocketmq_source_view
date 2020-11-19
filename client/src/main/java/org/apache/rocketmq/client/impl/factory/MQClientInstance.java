@@ -126,10 +126,22 @@ public class MQClientInstance {
     public MQClientInstance(ClientConfig clientConfig, int instanceIndex, String clientId, RPCHook rpcHook) {
         this.clientConfig = clientConfig;
         this.instanceIndex = instanceIndex;
+        /**
+         * netty客户端配置
+         */
         this.nettyClientConfig = new NettyClientConfig();
+        /**
+         * netty 客户端事件回调线程池配置
+         */
         this.nettyClientConfig.setClientCallbackExecutorThreads(clientConfig.getClientCallbackExecutorThreads());
         this.nettyClientConfig.setUseTLS(clientConfig.isUseTLS());
+        /**
+         * 客户端processor
+         */
         this.clientRemotingProcessor = new ClientRemotingProcessor(this);
+        /**
+         * 初始化netty客户端
+         */
         this.mQClientAPIImpl = new MQClientAPIImpl(this.nettyClientConfig, this.clientRemotingProcessor, rpcHook, clientConfig);
 
         if (this.clientConfig.getNamesrvAddr() != null) {
@@ -139,12 +151,25 @@ public class MQClientInstance {
 
         this.clientId = clientId;
 
+        /**
+         * 客户端管理实现类，如创建topic、查询偏移量、消费/订阅消息查询、消息查询等
+         * 这些运维管理等相关的接口默认通过vipChannel 即默认端口为10911-2 = 10909
+         */
         this.mQAdminImpl = new MQAdminImpl(this);
 
+        /**
+         * 消息pull线程
+         */
         this.pullMessageService = new PullMessageService(this);
 
+        /**
+         * consumer负载均衡线程
+         */
         this.rebalanceService = new RebalanceService(this);
 
+        /**
+         * 客户端内部producer，如重试消息发送等
+         */
         this.defaultMQProducer = new DefaultMQProducer(MixAll.CLIENT_INNER_PRODUCER_GROUP);
         this.defaultMQProducer.resetClientConfig(clientConfig);
 

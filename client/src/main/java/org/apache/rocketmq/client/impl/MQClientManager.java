@@ -45,12 +45,23 @@ public class MQClientManager {
     }
 
     public MQClientInstance getOrCreateMQClientInstance(final ClientConfig clientConfig, RPCHook rpcHook) {
+        // 客户端ID = 客户端ID + instanceName(也就是客户端jvm进程ID)
         String clientId = clientConfig.buildMQClientId();
+        /**
+         * 从缓存中取客户端实例对象，
+         * 同一个客户端共用一个客户端实例对象(共享连接)
+         */
         MQClientInstance instance = this.factoryTable.get(clientId);
         if (null == instance) {
+            /**
+             * 不存在创建客户端实例，netty客户端初始化，客户端processor初始化、注册等
+             */
             instance =
                 new MQClientInstance(clientConfig.cloneClientConfig(),
                     this.factoryIndexGenerator.getAndIncrement(), clientId, rpcHook);
+            /**
+             * 放入concurrentHashMap缓存避免并发重复创建
+             */
             MQClientInstance prev = this.factoryTable.putIfAbsent(clientId, instance);
             if (prev != null) {
                 instance = prev;

@@ -112,6 +112,7 @@ public class MessageClientIDSetter {
     }
 
     public static String createUniqID() {
+        // ip + pid + classLoader hashCode + timestamp diff + counter
         StringBuilder sb = new StringBuilder(LEN * 2);
         sb.append(FIX_STRING);
         sb.append(UtilAll.bytes2string(createUniqIDBuffer()));
